@@ -9,6 +9,7 @@ use bincode::{serialize, ErrorKind};
 use reqwest::StatusCode;
 use solana_client::rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig};
 use solana_client::rpc_response::{Response, RpcSimulateTransactionResult};
+use solana_sdk::signers::Signers;
 use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount,
     bs58::encode,
@@ -18,7 +19,7 @@ use solana_sdk::{
     instruction::Instruction,
     message::{v0, VersionedMessage},
     pubkey::Pubkey,
-    signature::{Signature, Signer},
+    signature::Signature,
     transaction::{Transaction, VersionedTransaction},
 };
 use std::time::{Duration, Instant};
@@ -35,12 +36,12 @@ impl Helius {
     ///
     /// # Returns
     /// The compute units consumed, or None if unsuccessful
-    pub async fn get_compute_units(
+    pub async fn get_compute_units<T: Signers + ?Sized>(
         &self,
         instructions: Vec<Instruction>,
         payer: Pubkey,
         lookup_tables: Vec<AddressLookupTableAccount>,
-        signers: &[&dyn Signer],
+        signers: &T,
     ) -> Result<Option<u64>> {
         // Set the compute budget limit
         let test_instructions: Vec<Instruction> = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)]
@@ -118,14 +119,17 @@ impl Helius {
     ///
     /// # Returns
     /// An optimized `Transaction` or `VersionedTransaction`
-    pub async fn create_smart_transaction(&self, config: &SmartTransactionConfig<'_>) -> Result<SmartTransaction> {
-        if config.signers.is_empty() {
+    pub async fn create_smart_transaction<T: Signers + ?Sized>(
+        &self,
+        config: &SmartTransactionConfig<'_, T>,
+    ) -> Result<SmartTransaction> {
+        if config.signers.pubkeys().is_empty() {
             return Err(HeliusError::InvalidInput(
                 "The fee payer must sign the transaction".to_string(),
             ));
         }
 
-        let payer_pubkey: Pubkey = config.signers[0].pubkey();
+        let payer_pubkey: Pubkey = config.signers.pubkeys()[0];
         let recent_blockhash: Hash = self.connection().get_latest_blockhash()?;
         let mut final_instructions: Vec<Instruction> = vec![];
 
@@ -156,9 +160,7 @@ impl Helius {
             // Sign the versioned transaction
             let signatures: Vec<Signature> = config
                 .signers
-                .iter()
-                .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+                .try_sign_message(versioned_message.serialize().as_slice())?;
 
             versioned_transaction = Some(VersionedTransaction {
                 signatures,
@@ -167,7 +169,7 @@ impl Helius {
         } else {
             // If no lookup tables are present, we build a regular transaction
             let mut tx: Transaction = Transaction::new_with_payer(&config.instructions, Some(&payer_pubkey));
-            tx.try_sign(&config.signers, recent_blockhash)?;
+            tx.try_sign(config.signers, recent_blockhash)?;
             legacy_transaction = Some(tx);
         }
 
@@ -216,7 +218,7 @@ impl Helius {
                 updated_instructions,
                 payer_pubkey,
                 config.lookup_tables.clone().unwrap_or_default(),
-                &config.signers,
+                config.signers,
             )
             .await?;
 
@@ -249,9 +251,7 @@ impl Helius {
             let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
             let signatures: Vec<Signature> = config
                 .signers
-                .iter()
-                .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+                .try_sign_message(versioned_message.serialize().as_slice())?;
 
             versioned_transaction = Some(VersionedTransaction {
                 signatures,
@@ -261,7 +261,7 @@ impl Helius {
             Ok(SmartTransaction::Versioned(versioned_transaction.unwrap()))
         } else {
             let mut tx: Transaction = Transaction::new_with_payer(&final_instructions, Some(&payer_pubkey));
-            tx.try_sign(&config.signers, recent_blockhash)?;
+            tx.try_sign(config.signers, recent_blockhash)?;
             legacy_transaction = Some(tx);
 
             Ok(SmartTransaction::Legacy(legacy_transaction.unwrap()))
@@ -276,7 +276,10 @@ impl Helius {
     ///
     /// # Returns
     /// The transaction signature, if successful
-    pub async fn send_smart_transaction(&self, config: SmartTransactionConfig<'_>) -> Result<Signature> {
+    pub async fn send_smart_transaction<T: Signers + ?Sized>(
+        &self,
+        config: SmartTransactionConfig<'_, T>,
+    ) -> Result<Signature> {
         let transaction: SmartTransaction = self.create_smart_transaction(&config).await?;
 
         // Common logic for sending transactions
