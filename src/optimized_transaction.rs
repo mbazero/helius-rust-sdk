@@ -50,6 +50,7 @@ impl Helius {
             .collect::<Vec<_>>();
 
         // Fetch the latest blockhash
+        // NOW: Use better commitment
         let recent_blockhash: Hash = self.connection().get_latest_blockhash()?;
 
         // Create a v0::Message
@@ -69,6 +70,10 @@ impl Helius {
         let result: Response<RpcSimulateTransactionResult> = self
             .connection()
             .simulate_transaction_with_config(&transaction, config)?;
+
+        if let Some(err) = result.value.err {
+            return Err(HeliusError::InvalidInput(format!("tx simulation failed: {err:?}")));
+        };
 
         // Return the units consumed or None if not available
         Ok(result.value.units_consumed)
@@ -229,7 +234,6 @@ impl Helius {
         }
 
         let compute_units: u64 = units.unwrap();
-        println!("{}", compute_units);
         let customers_cu: u32 = if compute_units < 1000 {
             1000
         } else {
